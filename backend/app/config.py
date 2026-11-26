@@ -54,5 +54,12 @@ VENDOR_API_TOKEN = os.environ.get("VENDOR_API_TOKEN", "")          # 服务间�
 VENDOR_TIMEOUT = float(os.environ.get("VENDOR_TIMEOUT", "30"))
 VENDOR_PAGE_SIZE = int(os.environ.get("VENDOR_PAGE_SIZE", "5000"))
 VENDOR_CACHE_TTL = float(os.environ.get("VENDOR_CACHE_TTL", "300"))  # 秒；Dataset 缓存时长
+# 乙方 costDaily 分币种返回 amountCny / amountUsd，不换算；人民币总额 = ΣCNY + ΣUSD × 汇率(调用方自定)。
+# 7.20 仅为占位值(与乙方文档示例一致)，上线前请按财务口径在 env 里改成实际汇率。
+USD_CNY_RATE = float(os.environ.get("USD_CNY_RATE", "7.20"))
+if USD_CNY_RATE <= 0:
+    raise RuntimeError(f"USD_CNY_RATE 必须大于 0，当前为 {USD_CNY_RATE}")
+# 统一门户接口(daList/accountList/accountTypeHistory/quotaConfig/userRoleInfo)的路径前缀 [TBD]：以门户接口文档为准
+VENDOR_PORTAL_API_PREFIX = os.environ.get("VENDOR_PORTAL_API_PREFIX", "/api/shenbiDashboardApi")
 # 文档 §4.1 备注：identity=other 的归属 [TBD]。employee=按员工，customer=按客户，test=按测试账号剔除
 VENDOR_OTHER_IDENTITY = os.environ.get("VENDOR_OTHER_IDENTITY", "employee")

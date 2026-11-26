@@ -14,7 +14,7 @@ import httpx
 from .. import config
 from . import dataset as D
 
-API = "/api/shenbiDashboardApi"
+DASHBOARD_API = "/api/dashboard"  # 乙方提供：dataStatus / usageDaily / costDaily
 
 IDENTITY = {"customer": "客户", "staff": "员工"}
 SUB_NAMES = {
@@ -24,9 +24,11 @@ SUB_NAMES = {
 # eventType → (引擎事件类型, 是否生成类)
 EVENT_KIND = {
     "login": (D.LOGIN, False), "pubmed_search": (D.PUBMED, False), "outline_generate": (D.OUTLINE, False), "library_share": (D.SHARE, False),
-    "ppt_generate": (D.PPT_GEN, True), "tweet_generate": (D.TWEET_GEN, True), "poster_generate": (D.POSTER_GEN, True),
-    "ppt_export": (D.PPT_EXP, False), "tweet_export": (D.TWEET_EXP, False), "poster_export": (D.POSTER_EXP, False),
+    "ppt_generate": (D.PPT_GEN, True), "article_generate": (D.TWEET_GEN, True), "poster_generate": (D.POSTER_GEN, True),
+    "ppt_export": (D.PPT_EXP, False), "article_export": (D.TWEET_EXP, False), "poster_export": (D.POSTER_EXP, False),
 }
+# costDaily.feature → 引擎功能名(推文 article → tweet)；未知功能归 other
+FEATURE = {"ppt": "ppt", "article": "tweet", "other": "other"}
 ROLE_MAP = {"super-admin": "super_admin", "da-manager": "da_admin", "ordinary-user": "other"}
 
 
@@ -35,7 +37,7 @@ class VendorError(RuntimeError):
 
 
 class VendorClient:
-    """薄封装：统一响应 {code, success, msg, data} 校验 + 分页。transport 可注入(测试用 httpx.MockTransport)。"""
+    """薄封装：统一响应 {code, message, data}(成功 code=0) 校验 + 分页。transport 可注入(测试用 httpx.MockTransport)。"""
 
     def __init__(self, base_url: str | None = None, token: str | None = None, transport: httpx.BaseTransport | None = None,
                  page_size: int | None = None, timeout: float | None = None):
@@ -51,15 +53,16 @@ class VendorClient:
         if r.status_code != 200:
             raise VendorError(f"乙方接口 HTTP {r.status_code}: {r.text[:200]}")
         body = r.json()
-        if body.get("code") != 200 or body.get("success") is False:
-            raise VendorError(f"乙方接口失败: code={body.get('code')} msg={body.get('msg')}")
+        # 乙方定稿：成功 code=0；门户接口文档未到，兼容 200。失败信息取 message(旧草案为 msg)
+        if body.get("code") not in (0, 200) or body.get("success") is False:
+            raise VendorError(f"乙方接口失败: code={body.get('code')} message={body.get('message') or body.get('msg')}")
         return body.get("data")
 
     def get(self, path: str, params: dict | None = None, headers: dict | None = None):
-        return self._unwrap(self.http.get(API + path, params=params, headers=headers))
+        return self._unwrap(self.http.get(path, params=params, headers=headers))
 
     def post(self, path: str, body: dict):
-        return self._unwrap(self.http.post(API + path, json=body))
+        return self._unwrap(self.http.post(path, json=body))
 
     def pages(self, path: str, body: dict) -> list[dict]:
         """拉取全部分页(records/total)。"""
@@ -82,6 +85,10 @@ def make_client() -> VendorClient:
     return _client_factory()
 
 
+def portal(path: str) -> str:
+    return config.VENDOR_PORTAL_API_PREFIX.rstrip("/") + path
+
+
 def _d(s: str | None) -> dt.date | None:
     return dt.date.fromisoformat(s[:10]) if s else None
 
@@ -93,7 +100,7 @@ def _dt(s: str) -> dt.datetime:
 def da_maps(client: VendorClient) -> tuple[dict[int, str | None], set[int]]:
     """daId -> daCode(无法识别为 None)、测试 DA 的 id 集合。"""
     code, tests = {}, set()
-    for x in client.get("/daList") or []:
+    for x in client.get(portal("/daList")) or []:
         code[x["daId"]] = x.get("daCode")
         if x.get("isTest"):
             tests.add(x["daId"])
@@ -141,29 +148,36 @@ def map_usage(rows: list[dict]) -> list[D.Event]:
     return events
 
 
+def map_costs(rows: list[dict], rate: float | None = None) -> list[D.CostRec]:
+    """costDaily → CostRec。乙方分币种返回，人民币金额 = amountCny + amountUsd × 汇率(config.USD_CNY_RATE)。
+    乙方保证同一笔费用只计入一个币种；缺失的币种字段按 0 处理。"""
+    fx = config.USD_CNY_RATE if rate is None else rate
+    return [D.CostRec(r["accountId"], _d(r["date"]), float(r.get("amountCny") or 0) + float(r.get("amountUsd") or 0) * fx,
+                      FEATURE.get(r.get("feature"), "other")) for r in rows]
+
+
 def build_dataset_from_client(client: VendorClient) -> D.Dataset:
-    status = client.get("/dataStatus")
+    status = client.get(DASHBOARD_API + "/dataStatus")
     as_of = _dt(status["asOf"])
     start = status.get("dataStartDate") or config.PLATFORM_LAUNCH_DATE
     rng = {"startDate": start, "endDate": as_of.date().isoformat()}
 
     code, test_das = da_maps(client)
-    accounts = [map_account(x, code, test_das) for x in client.pages("/accountList", {})]
+    accounts = [map_account(x, code, test_das) for x in client.pages(portal("/accountList"), {})]
     by_id = {a.id: a for a in accounts}
 
-    for h in client.pages("/accountTypeHistory", {"startDate": start, "endDate": rng["endDate"]}):
+    for h in client.pages(portal("/accountTypeHistory"), {"startDate": start, "endDate": rng["endDate"]}):
         a = by_id.get(h["accountId"])
         if a is not None and h.get("accountType") in ("PLUS", "SUPER"):
             a.type_history.append((_d(h["effectiveFrom"]), h["accountType"]))
     for a in accounts:
         a.type_history.sort()
 
-    events = map_usage(client.pages("/usageDaily", rng))
-    costs = [D.CostRec(r["accountId"], _d(r["date"]), float(r["amountCny"]), r.get("feature") or "other")
-             for r in client.pages("/costDaily", rng)]
+    events = map_usage(client.pages(DASHBOARD_API + "/usageDaily", rng))
+    costs = map_costs(client.pages(DASHBOARD_API + "/costDaily", rng))
 
     hist: dict[tuple[str, str], list] = defaultdict(list)
-    for q in client.get("/quotaConfig") or []:
+    for q in client.get(portal("/quotaConfig")) or []:
         da = code.get(q["daId"])
         if da and q.get("accountType") in ("PLUS", "SUPER"):
             hist[(da, q["accountType"])].append((_d(q["effectiveFrom"]), int(q["quota"])))
@@ -173,7 +187,7 @@ def build_dataset_from_client(client: VendorClient) -> D.Dataset:
         quotas[key] = [n for eff, n in lst if eff <= as_of.date()][-1] if any(eff <= as_of.date() for eff, _ in lst) else lst[0][1]
 
     return D.Dataset(accounts=accounts, events=events, costs=costs, quotas=quotas, as_of=as_of,
-                     fx_version=status.get("fxVersion") or "vendor", mock_fields=[], quota_history=dict(hist))
+                     fx_version=f"usd-cny-{config.USD_CNY_RATE:g}", mock_fields=[], quota_history=dict(hist))
 
 
 def build_dataset_from_vendor() -> D.Dataset:
@@ -190,7 +204,7 @@ def resolve_role(user_id: str) -> dict:
     if hit and time.time() - hit[0] < 60:
         return hit[1]
     c = make_client()
-    info = c.get("/userRoleInfo", {"userId": user_id}, headers={"loggedInUserId": user_id})
+    info = c.get(portal("/userRoleInfo"), {"userId": user_id}, headers={"loggedInUserId": user_id})
     role = ROLE_MAP.get(info.get("roleCode"), "other")
     code, _ = da_maps(c)
     managed = None if role == "super_admin" else [code[i] for i in (info.get("managedDaIds") or []) if code.get(i)]

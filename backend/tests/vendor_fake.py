@@ -1,4 +1,5 @@
-"""模拟乙方服务：按 docs/vendor-api-spec.md 实现 8 个接口(httpx.MockTransport)，含分页、统一响应包装、userRoleInfo。"""
+"""模拟乙方服务(httpx.MockTransport)：dataStatus/usageDaily/costDaily 按乙方定稿接口文档(/api/dashboard，code=0/message)，
+门户接口(daList/accountList/...)路径与字段文档未到，沿用草案(/api/shenbiDashboardApi)。含分页、统一响应包装、userRoleInfo。"""
 from __future__ import annotations
 
 import json
@@ -10,15 +11,15 @@ from app.vendor import dataset as D
 
 DA_CODES = ["BC", "LC", "GI", "HEMA", "OPH", "NS&RD", "INF", "IMMU", "NMA", "HSA", "MCE"]
 KIND_TO_EVENT = {D.LOGIN: "login", D.PUBMED: "pubmed_search", D.OUTLINE: "outline_generate", D.SHARE: "library_share",
-                 D.PPT_GEN: "ppt_generate", D.TWEET_GEN: "tweet_generate", D.POSTER_GEN: "poster_generate",
-                 D.PPT_EXP: "ppt_export", D.TWEET_EXP: "tweet_export", D.POSTER_EXP: "poster_export"}
+                 D.PPT_GEN: "ppt_generate", D.TWEET_GEN: "article_generate", D.POSTER_GEN: "poster_generate",
+                 D.PPT_EXP: "ppt_export", D.TWEET_EXP: "article_export", D.POSTER_EXP: "poster_export"}
 SUB_CODES = {"文献解读": "literature_interpretation", "学术创作Pro": "academic_creation_pro", "医学科普": "medical_popular_science",
              "专业学术": "professional_academic", "指南/政策解读": "guideline_policy"}
 
 
 class FakeVendor:
     def __init__(self, status=None, das=None, accounts=None, type_history=None, quotas=None, usage=None, costs=None, roles=None):
-        self.status = status or {"asOf": "2026-09-30 23:59:00", "dataStartDate": "2026-07-01", "updateFrequency": "T+1", "fxVersion": "v-test"}
+        self.status = status or {"asOf": "2026-09-30 23:59:00", "dataStartDate": "2026-07-01", "updateFrequency": "REALTIME_ASYNC"}
         self.das = das or []
         self.accounts, self.type_history, self.quotas = accounts or [], type_history or [], quotas or []
         self.usage, self.costs, self.roles = usage or [], costs or [], roles or {}
@@ -27,7 +28,7 @@ class FakeVendor:
     # —— 响应包装 / 分页 ——
     @staticmethod
     def ok(data):
-        return httpx.Response(200, json={"code": 200, "success": True, "msg": "ok", "data": data})
+        return httpx.Response(200, json={"code": 0, "message": "success", "data": data})
 
     def paged(self, name, rows, body):
         page, size = int(body.get("page", 1)), min(int(body.get("pageSize", 1000)), 5000)
@@ -40,7 +41,7 @@ class FakeVendor:
         return [r for r in rows if (not s or r[key] >= s) and (not e or r[key] <= e)]
 
     def handler(self, req: httpx.Request) -> httpx.Response:
-        path = req.url.path.split("/api/shenbiDashboardApi")[-1]
+        path = req.url.path.split("/api/dashboard")[-1].split("/api/shenbiDashboardApi")[-1]
         body = json.loads(req.content) if req.content else {}
         if path == "/dataStatus":
             return self.ok(self.status)
@@ -59,7 +60,7 @@ class FakeVendor:
         if path == "/userRoleInfo":
             uid = req.url.params.get("userId")
             if uid not in self.roles:
-                return httpx.Response(200, json={"code": 500, "success": False, "msg": "用户不存在", "data": None})
+                return httpx.Response(200, json={"code": 1001, "message": "用户不存在", "data": None})
             return self.ok(self.roles[uid])
         return httpx.Response(404)
 
@@ -86,12 +87,13 @@ def from_dataset(ds: D.Dataset, roles=None) -> FakeVendor:
         agg[k][0] += e.n
         if e.ok:
             agg[k][1] += e.n
-    gen_types = {"ppt_generate", "tweet_generate", "poster_generate"}
+    gen_types = {"ppt_generate", "article_generate", "poster_generate"}
     usage = [{"accountId": a, "date": d, "eventType": t, "subType": s, "count": c, "successCount": (ok if t in gen_types else None)}
              for (a, d, t, s), (c, ok) in sorted(agg.items())]
-    costs = [{"accountId": c.account_id, "date": c.day.isoformat(), "feature": c.fn, "tokenCount": 0, "amountCny": c.amount, "fxVersion": ds.fx_version}
+    costs = [{"accountId": c.account_id, "date": c.day.isoformat(), "feature": {"tweet": "article"}.get(c.fn, c.fn), "tokenCount": 0,
+              "amountCny": c.amount, "amountUsd": 0.0}
              for c in ds.costs]
     quotas = [{"daId": cid[da], "accountType": t, "quota": n, "effectiveFrom": eff.isoformat(), "note": None}
               for (da, t), hist in ds.quota_history.items() for eff, n in hist if da in cid]
-    status = {"asOf": ds.as_of.strftime("%Y-%m-%d %H:%M:%S"), "dataStartDate": "2026-07-01", "updateFrequency": "T+1", "fxVersion": ds.fx_version}
+    status = {"asOf": ds.as_of.strftime("%Y-%m-%d %H:%M:%S"), "dataStartDate": "2026-07-01", "updateFrequency": "REALTIME_ASYNC"}
     return FakeVendor(status, das, accounts, [], quotas, usage, costs, roles)

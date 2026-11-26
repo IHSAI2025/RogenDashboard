@@ -1,4 +1,4 @@
-"""乙方接口适配器：用模拟乙方服务(tests/vendor_fake.py，按 docs/vendor-api-spec.md)验证
+"""乙方接口适配器：用模拟乙方服务(tests/vendor_fake.py，按乙方定稿接口文档)验证
   1. 字段映射与分页（单元）
   2. 手算小数据集：PRD 口径逐条核对（使用/休眠/沉默/登录未使用/额度历史/月末账号类型/预算/花费/测试与非 DA 账号）
   3. 端到端 API（DATA_SOURCE=vendor）：角色经 userRoleInfo 解析、越权裁剪、X-Role 伪造无效
@@ -59,19 +59,19 @@ def small_vendor() -> FakeVendor:
         ev(2, "2026-09-12", "login", 3), ev(2, "2026-08-20", "pubmed_search", 1),
         ev(3, "2026-07-15", "pubmed_search", 1), ev(3, "2026-09-12", "login", 1),
         ev(5, "2026-08-25", "library_share", 1),
-        ev(5, "2026-09-04", "tweet_generate", 3, 0, "medical_popular_science"), ev(5, "2026-09-04", "tweet_export", 1),
+        ev(5, "2026-09-04", "article_generate", 3, 0, "medical_popular_science"), ev(5, "2026-09-04", "article_export", 1),
         ev(9, "2026-09-02", "outline_generate", 1),
-        ev(10, "2026-09-08", "tweet_generate", 2, 2, "professional_academic"),
+        ev(10, "2026-09-08", "article_generate", 2, 2, "professional_academic"),
         ev(7, "2026-09-02", "pubmed_search", 5),                                     # 测试账号的事件不应进入统计
         ev(1, "2026-09-07", "future_event_x", 9),                                    # 未知事件类型：忽略
         ev(1, "2026-09-07", "pubmed_search", 0),                                     # count=0：忽略
     ]
     costs = [
-        {"accountId": 1, "date": "2026-09-05", "feature": "ppt", "tokenCount": 1, "amountCny": 28.31, "fxVersion": "v-test"},
-        {"accountId": 10, "date": "2026-09-08", "feature": "tweet", "tokenCount": 1, "amountCny": 7.92, "fxVersion": "v-test"},
-        {"accountId": 5, "date": "2026-09-04", "feature": "other", "tokenCount": 1, "amountCny": 1.00, "fxVersion": "v-test"},
-        {"accountId": 2, "date": "2026-08-20", "feature": "ppt", "tokenCount": 1, "amountCny": 5.55, "fxVersion": "v-test"},
-        {"accountId": 7, "date": "2026-09-03", "feature": "ppt", "tokenCount": 1, "amountCny": 100.0, "fxVersion": "v-test"},
+        {"accountId": 1, "date": "2026-09-05", "feature": "ppt", "tokenCount": 1, "amountCny": 28.31, "amountUsd": 0.0},
+        {"accountId": 10, "date": "2026-09-08", "feature": "article", "tokenCount": 1, "amountCny": 7.92, "amountUsd": 0.0},
+        {"accountId": 5, "date": "2026-09-04", "feature": "other", "tokenCount": 1, "amountCny": 1.00, "amountUsd": 0.0},
+        {"accountId": 2, "date": "2026-08-20", "feature": "ppt", "tokenCount": 1, "amountCny": 5.55, "amountUsd": 0.0},
+        {"accountId": 7, "date": "2026-09-03", "feature": "ppt", "tokenCount": 1, "amountCny": 100.0, "amountUsd": 0.0},
     ]
     history = [{"accountId": 10, "accountType": "PLUS", "effectiveFrom": "2026-07-01"}, {"accountId": 10, "accountType": "SUPER", "effectiveFrom": "2026-09-20"}]
     quotas = [{"daId": 1, "accountType": "PLUS", "quota": 10, "effectiveFrom": "2026-07-01", "note": None},
@@ -100,7 +100,7 @@ def test_adapter_pagination_and_mapping():
     ds = VA.build_dataset_from_client(client_for(fake, page_size=2))
     assert len(ds.accounts) == 10                                    # 10 个账号分 5 页拉全
     assert [p for n, p in fake.calls if n == "/accountList"] == [1, 2, 3, 4, 5]
-    assert ds.as_of == dt.datetime(2026, 9, 30, 23, 59) and ds.fx_version == "v-test" and ds.mock_fields == []
+    assert ds.as_of == dt.datetime(2026, 9, 30, 23, 59) and ds.fx_version == f"usd-cny-{config.USD_CNY_RATE:g}" and ds.mock_fields == []
     a = {x.id: x for x in ds.accounts}
     assert a[1].da == "BC" and a[2].identity == "客户" and a[2].account_type == "SUPER" and a[2].source_tag == "免费"
     assert a[5].identity == "员工"                                    # identity=other 默认按员工
@@ -119,6 +119,62 @@ def test_usage_mapping_splits_success_and_failure_and_ignores_unknown():
     tw = [e for e in ds.events if e.account_id == 5 and e.kind == D.TWEET_GEN]
     assert [(e.n, e.ok, e.sub) for e in tw] == [(3, False, "医学科普")]           # successCount=0 → 全部失败
     assert not [e for e in ds.events if e.n <= 0] and len(ds.events) == 15       # 未知类型、count=0 被忽略(18 行 → 15 个事件)
+
+
+def test_envelope_code_zero_and_error_message():
+    ok = httpx_resp({"code": 0, "message": "success", "data": {"x": 1}})
+    assert VA.VendorClient(base_url="http://v.test", transport=ok).get("/api/dashboard/dataStatus") == {"x": 1}
+    bad = httpx_resp({"code": 40001, "message": "日期范围错误", "data": None})
+    with pytest.raises(VA.VendorError, match="日期范围错误"):
+        VA.VendorClient(base_url="http://v.test", transport=bad).get("/api/dashboard/usageDaily")
+    with pytest.raises(VA.VendorError, match="HTTP 401"):
+        VA.VendorClient(base_url="http://v.test", transport=httpx_resp({"code": 401, "message": "凭证无效"}, 401)).get("/x")
+
+
+def httpx_resp(body, status=200):
+    import httpx
+    return httpx.MockTransport(lambda req: httpx.Response(status, json=body))
+
+
+def test_vendor_and_portal_paths():
+    fake = small_vendor()
+    seen = []
+    orig = fake.handler
+    fake.handler = lambda req: (seen.append(req.url.path), orig(req))[1]
+    VA.build_dataset_from_client(client_for(fake))
+    dash = {p for p in seen if p.startswith("/api/dashboard/")}
+    assert dash == {"/api/dashboard/dataStatus", "/api/dashboard/usageDaily", "/api/dashboard/costDaily"}
+    assert {p for p in seen if p.startswith("/api/shenbiDashboardApi/")} >= {"/api/shenbiDashboardApi/daList", "/api/shenbiDashboardApi/accountList"}
+
+
+def test_article_events_mapped_to_tweet():
+    ds = VA.build_dataset_from_client(client_for(small_vendor()))
+    assert any(e.kind == D.TWEET_GEN for e in ds.events) and any(e.kind == D.TWEET_EXP for e in ds.events)   # 推文不丢失
+
+
+def test_cost_usd_converted_with_configured_rate(monkeypatch):
+    rows = [{"accountId": 1, "date": "2026-09-05", "feature": "article", "tokenCount": 310000, "amountCny": 7.92, "amountUsd": 1.25},
+            {"accountId": 1, "date": "2026-09-06", "feature": "ppt", "tokenCount": 1, "amountCny": 0, "amountUsd": 2.0},
+            {"accountId": 1, "date": "2026-09-07", "feature": "mystery", "tokenCount": 1, "amountCny": 1.0, "amountUsd": 0}]
+    c = VA.map_costs(rows, rate=7.20)
+    assert c[0].amount == pytest.approx(16.92) and c[0].fn == "tweet"          # 乙方文档示例：7.92 + 1.25 × 7.20
+    assert c[1].amount == pytest.approx(14.4) and c[1].fn == "ppt"
+    assert c[2].fn == "other"                                                  # 未知功能归 other
+    monkeypatch.setattr(config, "USD_CNY_RATE", 7.0)                           # 默认取 config.USD_CNY_RATE
+    assert VA.map_costs(rows)[0].amount == pytest.approx(7.92 + 1.25 * 7.0)
+    fake = small_vendor()
+    fake.costs = [{"accountId": 1, "date": "2026-09-05", "feature": "article", "tokenCount": 1, "amountCny": 1.0, "amountUsd": 1.0}]
+    ds = VA.build_dataset_from_client(client_for(fake))
+    assert ds.costs[0].amount == pytest.approx(8.0) and ds.fx_version == "usd-cny-7"
+
+
+def test_usd_cny_rate_must_be_positive(monkeypatch):
+    import importlib
+    monkeypatch.setenv("USD_CNY_RATE", "0")
+    with pytest.raises(RuntimeError, match="USD_CNY_RATE"):
+        importlib.reload(config)
+    monkeypatch.delenv("USD_CNY_RATE")
+    importlib.reload(config)
 
 
 def test_other_identity_config(monkeypatch):
@@ -323,6 +379,8 @@ def test_roundtrip_local_dataset_equals_vendor_pipeline():
     local.quotas = {k: v for k, v in local.quotas.items() if k[0] in DA_CODES}
     local.quota_history = {k: v for k, v in local.quota_history.items() if k[0] in DA_CODES}
     vendor = VA.build_dataset_from_client(client_for(from_dataset(local), page_size=1000))
+    assert vendor.fx_version == f"usd-cny-{config.USD_CNY_RATE:g}"   # 乙方不再返回 fxVersion，版本号由我方汇率生成；其余口径须一致
+    local.fx_version = vendor.fx_version
     assert len(vendor.accounts) == len(local.accounts)
 
     for scope in (Scope("super_admin", None), Scope("da_admin", ["BC"])):
