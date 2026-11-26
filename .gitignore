@@ -1,0 +1,32 @@
+# ── 数据(不入库) ──
+backend/data/
+backend/uploads/
+*.db
+*.sqlite*
+*.xlsx
+*.xls
+*.pptx
+临时后台开发数据包/
+临时后台开发数据包.zip
+docs/*.docx
+
+# ── 密钥/本地配置 ──
+backend/env
+.env
+.env.*
+!backend/env.example
+.claude/
+
+# ── 运行产物 ──
+logs/
+.run/
+*.log
+
+# ── 依赖/构建 ──
+node_modules/
+frontend/dist/
+__pycache__/
+*.pyc
+.venv/
+venv/
+.DS_Store
